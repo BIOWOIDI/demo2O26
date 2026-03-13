@@ -600,12 +600,6 @@ gateway 192.168.1.1
 systemctl restart networking
 ```
 
-> [!CAUTION]
-> Перед началом следует обновить устройство командой
-> ```bash
->apt-get update -y
-> ```
-
 ### Добавление пользователя
 ```bash
 adduser sshuser -u 2026
