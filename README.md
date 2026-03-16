@@ -716,8 +716,8 @@ hq-rtr  IN      A       192.168.1.1
 hq-cli  IN      A       192.168.2.3      
 br-rtr  IN      A       192.168.4.1
 br-srv  IN      A       192.168.4.2
-moodle  IN      CNAME   hq-rtr.au-team.irpo.
-wiki    IN      CNAME   hq-rtr.au-team.irpo.
+docker  IN      CNAME   br-rtr.au-team.irpo.
+web     IN      CNAME   hq-rtr.au-team.irpo.
 ```
 ![Screenshot](assets/50.png)
 
@@ -897,7 +897,10 @@ systemctl restart sshd
 
 ### Настройка часового пояса
 ```bash
-timedatectl set-timezone Asia/Tomsk
+date --set "2026-03-16 10:55:36"
+dpkg-reconfigure tzdata
+5
+79
 ```
 
 ---
@@ -910,8 +913,6 @@ nameserver 192.168.1.3
 ```
 ![Screenshot](assets/54.png)
 
-timedatectl set-timezone Asia/Tomsk
-нужно настроить через dnsmasq
 Зеркала Яндекса
 ```bash
 deb http://mirror.yandex.ru/debian/ bookworm main
@@ -1072,7 +1073,17 @@ nameserver 192.168.4.2
 realm join AU-TEAM.IRPO -U Administrator
 # Пароль: P@ssw0rd
 ```
-
+>[!WARNING]
+>Если на HQ-CLI во время присоединения к домену выдают ошибку, то стоит проверить точность времени на BR-SRV и HQ-CLI путем команды `date`, так как иногда происходят приколы с точностью даты и времени на виртуалках 
+```bash
+date --set "2026-03-16 10:55:36"
+#Ручное выставление даты, формат: yyyy-mm-dd hh:mm:ss
+dpkg-reconfigure tzdata
+#Выбор автоматической даты (именно после предыдущей команды)
+5
+79
+#Выбор Томска
+```
 Проверка:
 ```bash
 realm list
@@ -1113,7 +1124,7 @@ apt install mdadm -y
 ```bash
 lsblk
 ```
-> Предположим, что доступны диски `/dev/sdb` и `/dev/sdc`.
+> На виртуалке два доп. диска по 1 ГБ. Предположим, что доступны диски `/dev/sdb` и `/dev/sdc`.
 
 ### Создание RAID 1 (зеркало)
 ```bash
@@ -1289,6 +1300,7 @@ apt install ansible sshpass -y
 mkdir -p /etc/ansible
 nano /etc/ansible/hosts
 ```
+>У HQ-CLI скорее всего другой IPv4
 ```ini
 [hq]
 hq-srv ansible_host=192.168.1.2 ansible_user=sshuser ansible_password=P@ssw0rd ansible_port=2026
@@ -1298,6 +1310,8 @@ hq-cli ansible_host=192.168.2.3 ansible_user=root ansible_password=P@ssw0rd
 [br]
 br-rtr ansible_host=192.168.4.1 ansible_user=net_admin ansible_password=P@ssw0rd
 ```
+>[!NOTE]
+>Если с HQ-CLI не приходит ответ вида **pong**, то `apt install openssh-server`
 
 ### Настройка ansible.cfg
 ```bash
@@ -1316,7 +1330,6 @@ ansible all -m ping
 Ожидаемый вывод: `pong` от каждого хоста.
 
 > [!NOTE]
-> Если SSH на HQ-SRV и BR-SRV работает на порту 2026, убедитесь что `ansible_port=2026` указан в инвентаре.
 > Для хостов без нестандартного порта SSH порт по умолчанию 22.
 
 ---
@@ -1330,13 +1343,18 @@ systemctl enable docker
 systemctl start docker
 ```
 
+### Просмотр доступных дисков
+```bash
+lsblk
+```
+
 ### Загрузка образов из Additional.iso
 > Подмонтируйте Additional.iso и загрузите образы:
 ```bash
 mkdir -p /mnt/iso
 mount /dev/cdrom /mnt/iso
-docker load < /mnt/iso/site_latest.tar
-docker load < /mnt/iso/mariadb_latest.tar
+docker load < /mnt/iso/docker/site_latest.tar
+docker load < /mnt/iso/docker/mariadb_latest.tar
 ```
 
 ### Проверка загруженных образов
@@ -1349,27 +1367,37 @@ docker images
 mkdir -p /opt/testapp
 nano /opt/testapp/docker-compose.yml
 ```
+> Данные я и сам пока не знаю, но они будут дописаны, расположение данных `/mnt/iso/docker/readme.txt`
 ```yaml
 version: '3'
 
 services:
-  web:
+  testapp:
     image: site_latest
     container_name: testapp
+    restart: always
     ports:
-      - "8080:80"
+      - "8080:8000"
+    environment:
+      DB_HOST: "192.168.4.2"
+      DB_PORT: "3306"
+      DB_NAME: testdb
+      DB_USER: test
+      DB_PASS: P@ssw0rd
+      DB_TYPE: maria
     depends_on:
       - db
-    restart: always
 
   db:
     image: mariadb_latest
     container_name: db
+    ports:
+      - "3306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: P@ssw0rd
-      MYSQL_DATABASE: testdb
-      MYSQL_USER: test
-      MYSQL_PASSWORD: P@ssw0rd
+      MARIADB_DATABASE: testdb
+      MARIADB_USER: test
+      MARIADB_PASSWORD: P@ssw0rd
+      MARIADB_ROOT_PASSWORD: P@ssw0rd
     restart: always
 ```
 
@@ -1464,31 +1492,21 @@ curl http://localhost
 
 ## <p align="center"><b>8. Проброс портов (iptables)</b></p>
 
-### На BR-RTR: проброс порта 8080 на testapp (BR-SRV)
+### На BR-RTR: проброс портов 8080, 2026 на BR-SRV
 ```bash
 iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 192.168.4.2:8080
+iptables -t nat -A PREROUTING -p tcp --dport 2026 -j DNAT --to-destination 192.168.4.2:2026
 iptables -A FORWARD -p tcp -d 192.168.4.2 --dport 8080 -j ACCEPT
+iptables -A FORWARD -p tcp -d 192.168.4.2 --dport 2026 -j ACCEPT
 iptables-save > /etc/iptables/rules.v4
 ```
 
-### На HQ-RTR: проброс порта 8080 на web (HQ-SRV)
+### На HQ-RTR: проброс порта 8080, 2026 на HQ-SRV
 ```bash
 iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 192.168.1.2:80
-iptables -A FORWARD -p tcp -d 192.168.1.2 --dport 80 -j ACCEPT
-iptables-save > /etc/iptables/rules.v4
-```
-
-### На HQ-RTR: проброс SSH (порт 2026) на HQ-SRV
-```bash
 iptables -t nat -A PREROUTING -p tcp --dport 2026 -j DNAT --to-destination 192.168.1.2:2026
+iptables -A FORWARD -p tcp -d 192.168.1.2 --dport 80 -j ACCEPT
 iptables -A FORWARD -p tcp -d 192.168.1.2 --dport 2026 -j ACCEPT
-iptables-save > /etc/iptables/rules.v4
-```
-
-### На BR-RTR: проброс SSH (порт 2026) на BR-SRV
-```bash
-iptables -t nat -A PREROUTING -p tcp --dport 2026 -j DNAT --to-destination 192.168.4.2:2026
-iptables -A FORWARD -p tcp -d 192.168.4.2 --dport 2026 -j ACCEPT
 iptables-save > /etc/iptables/rules.v4
 ```
 
@@ -1613,19 +1631,4 @@ curl http://docker.au-team.irpo
 > ```bash
 > nslookup web.au-team.irpo
 > nslookup docker.au-team.irpo
-> ```
-
----
-
-> [!NOTE]
-> **Дополнительные DNS-записи для Модуля 2**
-> 
-> На HQ-SRV в файл прямой зоны `/etc/bind/au-team.irpo` необходимо добавить/проверить записи:
-> ```dns
-> docker  IN      CNAME   br-rtr.au-team.irpo.
-> web     IN      CNAME   hq-rtr.au-team.irpo.
-> ```
-> После изменения увеличьте Serial и перезапустите BIND:
-> ```bash
-> systemctl restart bind9
 > ```
